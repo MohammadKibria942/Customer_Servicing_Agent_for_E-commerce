@@ -3,34 +3,37 @@ from typing import Literal, Tuple, Optional
 from utils.llm_client import chat_completion, classify_intent_llm
 from tools.order_tools import find_order_by_id, find_orders_by_email
 from tools.faq_tools import find_best_faq_match
+import re
+
 
 
 def classify_intent(user_message: str) -> Literal["ORDER", "FAQ", "OTHER"]:
     """
-    Hybrid classifier:
-    1) Fast heuristic for obvious cases (to save tokens).
-    2) Fallback to LLM-based classification for everything else.
+    Main intent classifier.
+
+    1) Use the LLM classifier as the primary signal.
+    2) Apply a very small heuristic override ONLY when clearly necessary
+       (e.g. pure tracking requests with an order ID).
     """
+    # 1) Let the LLM decide first
+    intent = classify_intent_llm(user_message)
+
     text = user_message.lower()
-
-    # 1) Simple heuristic for very clear cases
-    order_keywords = ["order", "track", "tracking", "delivery", "shipped", "package", "parcel"]
-    faq_keywords = ["return", "refund", "policy", "delivery time", "shipping", "payment", "pay", "international"]
-
-    # If message is mostly digits or mentions 'order', treat as ORDER
     tokens = text.split()
     has_number = any(t.isdigit() for t in tokens)
 
-    if any(k in text for k in order_keywords) or has_number:
-        return "ORDER"
-    if any(k in text for k in faq_keywords):
-        return "FAQ"
+    # 2) Tiny heuristic override: if the user very clearly provides an order id
+    #    and talks about tracking/status, force ORDER.
+    tracking_keywords = ["track", "tracking", "where is", "status", "shipped", "delivery status"]
 
-    # 2) Fallback to LLM classifier
-    intent = classify_intent_llm(user_message)
+    if any(k in text for k in tracking_keywords) and has_number:
+        return "ORDER"
+
+    # Otherwise, trust the LLM's classification
     if intent not in {"ORDER", "FAQ", "OTHER"}:
         intent = "OTHER"
     return intent
+
 
 
 
@@ -87,59 +90,86 @@ def handle_order_query(user_message: str) -> str:
 
 def handle_faq_query(user_message: str) -> str:
     """
-    Use FAQ tools to find the best matching FAQ and then have the LLM answer.
+    Use RAG-style FAQ retrieval:
+    - Retrieve top FAQ entries semantically using embeddings
+    - Let the LLM synthesize the best answer using those entries
     """
-    faq = find_best_faq_match(user_message)
+    faqs = find_best_faq_match(user_message, k=3)  # get top 3 for more context
+    # Build a context string with the retrieved FAQs
+    faq_context_parts = []
+    for i, faq in enumerate(faqs, start=1):
+        faq_context_parts.append(
+            f"FAQ {i} Question: {faq['question']}\nFAQ {i} Answer: {faq['answer']}"
+        )
+    faq_context = "\n\n".join(faq_context_parts)
 
     system_prompt = (
-        "You are a helpful e-commerce customer service agent. "
-        "You will be given an FAQ entry (question + answer) and the customer's question. "
-        "Answer the customer using the FAQ answer. "
-        "Do not contradict the FAQ. If the FAQ doesn't fully answer, say so briefly."
+        "You are a helpful and professional e-commerce customer service agent. "
+        "You will be given several FAQ entries (questions and answers) and the customer's question. "
+        "Your job is to answer the customer using ONLY the information from the FAQs. "
+        "If the FAQs do not contain enough information, say so briefly and suggest contacting human support. "
+        "Do not invent new policies or contradict the FAQs."
     )
 
     user_prompt = (
-        f"Customer question: {user_message}\n\n"
-        f"Relevant FAQ question: {faq['question']}\n"
-        f"Relevant FAQ answer: {faq['answer']}\n\n"
-        "Using this FAQ, provide the best possible answer to the customer."
+        f"Customer question:\n{user_message}\n\n"
+        f"Here are relevant FAQ entries:\n{faq_context}\n\n"
+        "Using ONLY this information, provide the best possible answer to the customer."
     )
 
     return chat_completion(system_prompt, user_prompt)
 
 
-def handle_message(user_message: str) -> Tuple[str, str]:
-    """
-    Main orchestration function:
-    - Classify intent (ORDER / FAQ / OTHER)
-    - Call the appropriate specialist agent
-    Returns (intent, response_text)
-    """
-    intent = classify_intent(user_message)
 
+def handle_message(user_message: str, state) -> Tuple[str, str]:
+    """
+    Main orchestrator with multi-turn order handling.
+    """
+
+    # --- 1. Multi-turn: If user previously needed to provide an order ID ---
+    if state.pending_intent == "ORDER_NEEDS_ID":
+        # Try extracting order ID
+        match = re.search(r"\b(\d+)\b", user_message)
+        if match:
+            order_id = match.group(1)
+            state.reset()  # clear pending state
+            return "ORDER", handle_order_query(f"order {order_id}")
+        else:
+            return "ORDER", (
+                "I still need your order ID to look up your order.\n"
+                "Please provide it, for example: 'My order ID is 1001'."
+            )
+
+    # --- 2. Normal first-time intent detection ---
+    intent = classify_intent(user_message)
+    state.last_intent = intent
+
+    # --- 3. ORDER: check if an order ID exists ---
     if intent == "ORDER":
-        response = handle_order_query(user_message)
-    elif intent == "FAQ":
-        response = handle_faq_query(user_message)
-    else:
-        # Fallback for OTHER – stay professional and focused on support
-        system_prompt = (
-            "You are a professional e-commerce customer support assistant. "
-            "Your ONLY job is to help with:\n"
-            "- order tracking and delivery issues\n"
-            "- returns, refunds, and product issues\n"
-            "- general store policies (shipping, payments, etc.)\n\n"
-            "If the user asks for anything unrelated (for example: jokes, small talk, "
-            "personal questions, or general chit-chat), you MUST politely decline and "
-            "redirect them back to support-related topics.\n\n"
-            "Rules:\n"
-            "- Do NOT tell jokes or entertain unrelated requests.\n"
-            "- Keep responses short, polite, and professional.\n"
-            "- When declining, briefly explain that you are focused on customer support "
-            "and suggest they ask a question about an order or store policy."
+        # Try to extract an order ID
+        match = re.search(r"\b(\d+)\b", user_message)
+        if match:
+            order_id = match.group(1)
+            return "ORDER", handle_order_query(f"order {order_id}")
+
+        # No order ID provided → ask for it, and store pending state
+        state.pending_intent = "ORDER_NEEDS_ID"
+        state.pending_order_message = user_message
+        return "ORDER", (
+            "I can help with your order, but I’ll need your order ID.\n"
+            "Please provide it in your next message, for example: 'My order ID is 1001'."
         )
 
-        response = chat_completion(system_prompt, user_message)
+    # --- 4. FAQ ---
+    if intent == "FAQ":
+        return "FAQ", handle_faq_query(user_message)
 
-    return intent, response
+    # --- 5. OTHER ---
+    system_prompt = (
+        "You are a professional e-commerce customer support assistant. "
+        "You ONLY assist with order tracking, returns, refunds, shipping, and payments. "
+        "If the user asks something unrelated, politely decline and redirect them."
+    )
+    return "OTHER", chat_completion(system_prompt, user_message)
+
 
