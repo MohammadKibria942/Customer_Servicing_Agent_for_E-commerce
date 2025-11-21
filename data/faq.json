@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What is your return policy?",
+    "answer": "You can return most items within 30 days of delivery as long as they are in their original condition and packaging."
+  },
+  {
+    "question": "How long does delivery take?",
+    "answer": "Standard delivery takes 3-5 business days. Express delivery takes 1-2 business days."
+  },
+  {
+    "question": "Which payment methods do you accept?",
+    "answer": "We accept major credit cards, PayPal, Apple Pay and Google Pay."
+  },
+  {
+    "question": "How do I track my order?",
+    "answer": "You can track your order using the tracking link in your confirmation email or by providing your order ID and email address to our support agent."
+  },
+  {
+    "question": "Do you ship internationally?",
+    "answer": "Yes, we ship to most countries worldwide. Shipping fees and times vary by location."
+  }
+]

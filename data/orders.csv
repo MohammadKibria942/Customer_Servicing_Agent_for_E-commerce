@@ -1,0 +1,5 @@
+order_id,user_email,status,courier,tracking_url,expected_delivery,last_updated
+1001,jane@example.com,Shipped,DHL,https://tracking.example.com/1001,23/11/2025,20/11/2025
+1002,john@example.com,Out for delivery,UPS,https://tracking.example.com/1002,21/11/2025,21/11/2025
+1003,jane@example.com,Delivered,Royal Mail,https://tracking.example.com/1003,18/11/2025,18/11/2025
+1004,sam@example.com,Processing,DPD,https://tracking.example.com/1004,27/11/2025,25/11/2025
